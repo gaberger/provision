@@ -191,13 +191,13 @@ func TestRenderData(t *testing.T) {
 	rt.Do(func(d Stores) {
 		machine.BootEnv = "nothing"
 		saved, err := rt.Save(machine)
-		if !saved {
+		if !saved || err != nil {
 			t.Errorf("Failed to save test machine with new bootenv: %v", err)
 		}
 	})
 	out, err = dt.FS.Open(genLoc, nil)
 	if err != nil {
-		t.Errorf("Failed to get tmeplate for %s: %v", genLoc, err)
+		t.Errorf("Failed to get template for %s: %v", genLoc, err)
 	}
 	buf, err = ioutil.ReadAll(out)
 	if err != nil {

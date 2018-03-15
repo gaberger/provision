@@ -243,6 +243,10 @@ func Fill(t store.KeySaver) {
 		if obj.User == nil {
 			obj.User = &models.User{}
 		}
+	case *Workflow:
+		if obj.Workflow == nil {
+			obj.Workflow = &models.Workflow{}
+		}
 	default:
 		panic(fmt.Sprintf("Unknown backend model %T", t))
 	}
@@ -280,6 +284,8 @@ func ModelToBackend(m models.Model) store.KeySaver {
 		return &Template{Template: obj}
 	case *models.User:
 		return &User{User: obj}
+	case *models.Workflow:
+		return &Workflow{Workflow: obj}
 	default:
 		panic(fmt.Sprintf("Unknown model %T", m))
 	}
@@ -445,6 +451,16 @@ func toBackend(m models.Model, rt *RequestTracker) store.KeySaver {
 		res.User = obj
 		res.rt = rt
 		return &res
+	case *models.Workflow:
+		var res Workflow
+		if ours != nil {
+			res = *ours.(*Workflow)
+		} else {
+			res = Workflow{}
+		}
+		res.Workflow = obj
+		res.rt = rt
+		return &res
 
 	default:
 		log.Panicf("Unknown model %T", m)
@@ -548,6 +564,7 @@ func allKeySavers() []models.Model {
 		&Lease{},
 		&Plugin{},
 		&Job{},
+		&Workflow{},
 	}
 }
 
