@@ -24,14 +24,18 @@ type Machine struct {
 	*models.Machine
 	validate
 	// used during AfterSave() and AfterRemove() to handle boot environment changes.
-	oldBootEnv, oldStage, oldWorkflow string
-	changeStageAllowed, inCreate      bool
+	oldBootEnv, oldStage, oldWorkflow      string
+	changeStageAllowed, inCreate, inRunner bool
 
 	toDeRegister, toRegister renderers
 }
 
 func (obj *Machine) SetReadOnly(b bool) {
 	obj.ReadOnly = b
+}
+
+func (obj *Machine) InRunner() {
+	obj.inRunner = true
 }
 
 func (n *Machine) AllowStageChange() {
@@ -698,6 +702,7 @@ func (n *Machine) AfterSave() {
 	n.oldWorkflow = n.Workflow
 	n.changeStageAllowed = false
 	n.inCreate = false
+	n.inRunner = false
 	n.rt.dt.macAddrMux.Lock()
 	for _, mac := range n.HardwareAddrs {
 		n.rt.dt.macAddrMap[mac] = n.UUID()
@@ -749,9 +754,6 @@ func (n *Machine) oldOnChange(oldm *Machine, e *models.Error) {
 	if n.oldStage != n.Stage && oldm.CurrentTask != len(oldm.Tasks) && !n.ChangeForced() {
 		e.Errorf("Can not change stages with pending tasks unless forced")
 	}
-	if n.oldStage == n.Stage && !(n.CurrentTask == -1 || n.CurrentTask == oldm.CurrentTask) {
-		e.Errorf("Cannot change CurrentTask from %d to %d", oldm.CurrentTask, n.CurrentTask)
-	}
 	if n.Stage != "none" && n.oldStage == n.Stage && n.oldBootEnv != n.BootEnv && !n.ChangeForced() {
 		e.Errorf("Can not change bootenv while in a stage unless forced. old: %s new %s", n.oldBootEnv, n.BootEnv)
 	}
@@ -796,6 +798,10 @@ func (n *Machine) OnChange(oldThing store.KeySaver) error {
 		Type:  ValidationError,
 		Model: n.Prefix(),
 		Key:   n.Key(),
+	}
+	if !n.inRunner && !(oldm.CurrentTask == n.CurrentTask || n.CurrentTask == -1) {
+		e.Errorf("Cannot change CurrentTask from %d to %d", oldm.CurrentTask, n.CurrentTask)
+		return e
 	}
 	if n.Workflow == "" {
 		n.oldOnChange(oldm, e)
