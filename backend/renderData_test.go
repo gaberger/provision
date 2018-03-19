@@ -189,11 +189,17 @@ func TestRenderData(t *testing.T) {
 		t.Logf("BootEnv default with fred rendered properly for test machine")
 	}
 	rt.Do(func(d Stores) {
+		dbgPref := rt.dt.pref("logLevel")
+		rt.dt.SetPrefs(rt, map[string]string{"logLevel": "trace", "debugRenderer": "trace", "debugBootEnv": "trace"})
 		machine.BootEnv = "nothing"
 		saved, err := rt.Save(machine)
 		if !saved || err != nil {
 			t.Errorf("Failed to save test machine with new bootenv: %v", err)
 		}
+		if machine.HasError() != nil {
+			t.Errorf("Machine error: %v", machine.HasError())
+		}
+		rt.dt.SetPrefs(rt, map[string]string{"logLevel": dbgPref, "debugRenderer": dbgPref, "debugBootEnv": dbgPref})
 	})
 	out, err = dt.FS.Open(genLoc, nil)
 	if err != nil {

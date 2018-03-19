@@ -25,12 +25,17 @@ type Machine struct {
 	validate
 	// used during AfterSave() and AfterRemove() to handle boot environment changes.
 	oldBootEnv, oldStage, oldWorkflow string
-	changeStageAllowed                bool
-	toDeRegister, toRegister          renderers
+	changeStageAllowed, inCreate      bool
+
+	toDeRegister, toRegister renderers
 }
 
 func (obj *Machine) SetReadOnly(b bool) {
 	obj.ReadOnly = b
+}
+
+func (n *Machine) AllowStageChange() {
+	n.changeStageAllowed = true
 }
 
 func (obj *Machine) SaveClean() store.KeySaver {
@@ -383,6 +388,7 @@ func (n *Machine) New() store.KeySaver {
 }
 
 func (n *Machine) OnCreate() error {
+	n.inCreate = true
 	n.oldStage = "none"
 	n.oldBootEnv = "local"
 	if n.Stage == "" {
@@ -403,8 +409,6 @@ func (n *Machine) OnCreate() error {
 		n.Profile.Params = nil
 	}
 	n.changeStageAllowed = true
-	// All machines start runnable.
-	n.Runnable = true
 	if n.Tasks != nil && len(n.Tasks) > 0 {
 		n.CurrentTask = -1
 	}
@@ -509,10 +513,10 @@ func (n *Machine) validateChangeWorkflow() {
 }
 
 func (n *Machine) validateChangeStage() {
-	if n.oldStage == n.Stage {
+	if n.oldStage == n.Stage && !n.inCreate {
 		return
 	}
-	if !n.changeStageAllowed {
+	if n.Workflow != "" && !n.changeStageAllowed {
 		n.Errorf("Changing machine stage not allowed")
 		return
 	}
@@ -529,7 +533,7 @@ func (n *Machine) validateChangeStage() {
 		return
 	}
 	stage := obj.(*Stage)
-	if !stage.Available {
+	if !stage.Available && n.Workflow == "" {
 		n.CurrentTask = 0
 		n.Tasks = []string{}
 		n.Errorf("Machine %s wants Stage %s, which is not available", n.UUID(), n.Stage)
@@ -545,8 +549,9 @@ func (n *Machine) validateChangeStage() {
 		// BootEnv should still be valid because Stage is valid.
 		n.BootEnv = stage.BootEnv
 	}
-	if n.Workflow != "" {
-		// If the Machine is being managed by a Workflow, then
+	if n.Workflow != "" || (len(stage.Tasks) == 0 && n.inCreate) {
+		// If the Machine is being managed by a Workflow, or the Stage
+		// does not have any Tasks and we are creating a Machine, then
 		// changing stage does not imply changing the task list.
 		return
 	}
@@ -557,42 +562,24 @@ func (n *Machine) validateChangeStage() {
 	} else {
 		n.CurrentTask = 0
 	}
-	tasks := n.rt.stores("tasks")
-	if tasks == nil {
-		n.Errorf("No tasks defined in the system")
-		return
-	}
-	for i, taskName := range n.Tasks {
-		obj := tasks.Find(taskName)
-		if obj == nil {
-			n.Errorf("Task %s (at %d) does not exist", taskName, i)
-			continue
-		}
-		task := obj.(*Task)
-		if !task.Available {
-			n.Errorf("Task %s (at %d) is not available", taskName, i)
-		}
-	}
 }
 
 func (n *Machine) validateChangeEnv() {
-	if n.oldBootEnv == n.BootEnv {
+	if n.oldBootEnv == n.BootEnv && !n.inCreate {
 		return
 	}
-	if !n.changeStageAllowed {
+	if n.Workflow != "" && !n.changeStageAllowed {
 		n.Errorf("Changing machine bootenv not allowed")
 		return
 	}
 	bootEnvs := n.rt.stores("bootenvs")
 	if bootEnvs == nil {
 		n.Errorf("Bootenv %s does not exist", n.BootEnv)
-		n.SetInvalid()
 		return
 	}
 	obj := bootEnvs.Find(n.BootEnv)
 	if obj == nil {
 		n.Errorf("Bootenv %s does not exist", n.BootEnv)
-		n.SetInvalid()
 		return
 	}
 	env := obj.(*BootEnv)
@@ -604,7 +591,7 @@ func (n *Machine) validateChangeEnv() {
 		n.Errorf("BootEnv %s is not available", n.BootEnv)
 		return
 	}
-	n.Runnable = false
+	n.Runnable = n.oldBootEnv == n.BootEnv || n.inCreate
 	if obFound := bootEnvs.Find(n.oldBootEnv); obFound != nil {
 		oldEnv := AsBootEnv(obFound)
 		n.toDeRegister = append(n.toDeRegister, oldEnv.Render(n.rt, n, n)...)
@@ -710,6 +697,7 @@ func (n *Machine) AfterSave() {
 	n.oldBootEnv = n.BootEnv
 	n.oldWorkflow = n.Workflow
 	n.changeStageAllowed = false
+	n.inCreate = false
 	n.rt.dt.macAddrMux.Lock()
 	for _, mac := range n.HardwareAddrs {
 		n.rt.dt.macAddrMap[mac] = n.UUID()
@@ -751,36 +739,18 @@ func (n *Machine) OnLoad() error {
 	return err
 }
 
-func (n *Machine) oldOnChange(oldm *Machine) error {
+func (n *Machine) oldOnChange(oldm *Machine, e *models.Error) {
 	// If we are changing stages and we aren't done running tasks,
 	// Fail unless the users marks a force
 	// If we have a stage set, don't change bootenv unless force
-	n.changeStageAllowed = true
 	if n.Stage == "" {
 		n.Stage = "none"
-	}
-	e := &models.Error{
-		Code:  http.StatusUnprocessableEntity,
-		Type:  ValidationError,
-		Model: n.Prefix(),
-		Key:   n.Key(),
 	}
 	if n.oldStage != n.Stage && oldm.CurrentTask != len(oldm.Tasks) && !n.ChangeForced() {
 		e.Errorf("Can not change stages with pending tasks unless forced")
 	}
 	if n.oldStage == n.Stage && !(n.CurrentTask == -1 || n.CurrentTask == oldm.CurrentTask) {
 		e.Errorf("Cannot change CurrentTask from %d to %d", oldm.CurrentTask, n.CurrentTask)
-	}
-	if n.oldStage == n.Stage && n.CurrentTask != -1 && !reflect.DeepEqual(oldm.Tasks, n.Tasks) {
-		runningBound := n.CurrentTask
-		if runningBound != len(oldm.Tasks) {
-			runningBound += 1
-		}
-		if len(n.Tasks) < len(oldm.Tasks) && len(n.Tasks) < runningBound {
-			e.Errorf("Cannot remove tasks that have already executed or are already executing")
-		} else if !reflect.DeepEqual(n.Tasks[:runningBound], oldm.Tasks[:runningBound]) {
-			e.Errorf("Cannot change tasks that have already executed or are executing")
-		}
 	}
 	if n.Stage != "none" && n.oldStage == n.Stage && n.oldBootEnv != n.BootEnv && !n.ChangeForced() {
 		e.Errorf("Can not change bootenv while in a stage unless forced. old: %s new %s", n.oldBootEnv, n.BootEnv)
@@ -789,80 +759,29 @@ func (n *Machine) oldOnChange(oldm *Machine) error {
 	if n.Runnable && len(oldm.Tasks) == 0 && len(n.Tasks) != 0 {
 		n.CurrentTask = -1
 	}
-
-	return e.HasError()
 }
 
-func (n *Machine) newOnChange(oldm *Machine) error {
-	e := &models.Error{
-		Code:  http.StatusUnprocessableEntity,
-		Type:  ValidationError,
-		Model: n.Prefix(),
-		Key:   n.Key(),
+func (n *Machine) newOnChange(oldm *Machine, e *models.Error) {
+	if n.CurrentTask == oldm.CurrentTask || n.CurrentTask != -1 {
+		return
 	}
-	runningBound := oldm.CurrentTask + 1
-	thePast := oldm.Tasks[:runningBound]
-	if len(n.Tasks) < len(thePast) || !reflect.DeepEqual(thePast, n.Tasks[:runningBound]) {
-		e.Errorf("Cannot change tasks that have already executed or are executing")
-		return e
-	}
-	taskPtrChanged := oldm.CurrentTask != n.CurrentTask
-	taskListChanged := !reflect.DeepEqual(n.Tasks, oldm.Tasks)
-	if taskPtrChanged && taskListChanged {
-		e.Errorf("Cannot change the current task and the task list at the same time")
-		return e
-	}
-	if taskPtrChanged {
-		if n.CurrentTask != -1 {
-			e.Errorf("Cannot change CurrentTask to %d", n.CurrentTask)
-			return e
+	lBound := oldm.CurrentTask
+	for ; lBound > -1; lBound-- {
+		thing := n.Tasks[lBound]
+		if !strings.HasPrefix("stage:", thing) {
+			continue
 		}
-		lBound := len(thePast)
-		for lBound >= 0 {
-			lBound -= 1
-			if lBound == -1 {
-				break
-			}
-			thing := thePast[lBound]
-			if !strings.HasPrefix("stage:", thing) {
-				continue
-			}
-			obj := n.rt.find("stages", strings.TrimPrefix("stage:", thing))
-			if obj == nil {
-				e.Errorf("%s is missing", thing)
-				return e
-			}
-			stage := obj.(*Stage)
-			if stage.BootEnv == "" || stage.BootEnv == n.BootEnv {
-				continue
-			}
+		obj := n.rt.find("stages", strings.TrimPrefix("stage:", thing))
+		if obj == nil {
+			e.Errorf("%s is missing", thing)
+			return
+		}
+		stage := obj.(*Stage)
+		if stage.BootEnv != "" && stage.BootEnv != n.BootEnv {
 			break
 		}
-		n.CurrentTask = lBound
-		return nil
 	}
-	oldFuture, newFuture := n.CurrentTask, n.CurrentTask
-
-	for oldFuture < len(oldm.Tasks) {
-		if strings.HasPrefix("stage:", oldm.Tasks[oldFuture]) {
-			break
-		}
-		oldFuture += 1
-	}
-	for newFuture < len(n.Tasks) {
-		if strings.HasPrefix("stage:", n.Tasks[newFuture]) {
-			break
-		}
-		if s := strings.SplitN(n.Tasks[newFuture], ":", 2); len(s) == 2 && s[0] != "stage" {
-			e.Errorf("Unprocessable entry in task list at %d: %s", newFuture, n.Tasks[newFuture])
-		}
-		newFuture += 1
-	}
-	if !reflect.DeepEqual(oldm.Tasks[oldFuture:], n.Tasks[newFuture:]) {
-		e.Errorf("Cannot change future tasks beyond the next stage change")
-		return e
-	}
-	return e.HasError()
+	n.CurrentTask = lBound
 }
 
 func (n *Machine) OnChange(oldThing store.KeySaver) error {
@@ -870,12 +789,34 @@ func (n *Machine) OnChange(oldThing store.KeySaver) error {
 	n.oldBootEnv = oldm.BootEnv
 	n.oldStage = oldm.Stage
 	n.oldWorkflow = oldm.Workflow
-
-	if n.Workflow == "" {
-		return n.oldOnChange(oldm)
-	} else {
-		return n.newOnChange(oldm)
+	oldPast, _, oldFuture := oldm.SplitTasks()
+	newPast, _, newFuture := n.SplitTasks()
+	e := &models.Error{
+		Code:  http.StatusUnprocessableEntity,
+		Type:  ValidationError,
+		Model: n.Prefix(),
+		Key:   n.Key(),
 	}
+	if n.Workflow == "" {
+		n.oldOnChange(oldm, e)
+	} else {
+		n.newOnChange(oldm, e)
+	}
+	if oldm.CurrentTask == n.CurrentTask {
+		if !reflect.DeepEqual(oldPast, newPast) {
+			if len(oldPast) > len(newPast) {
+				e.Errorf("Cannot remove tasks that have already executed or are already executing")
+			} else {
+				e.Errorf("Cannot change tasks that have already executed or are executing")
+			}
+		}
+		if !reflect.DeepEqual(oldFuture, newFuture) {
+			e.Errorf("Cannot change tasks that are past the next stage transition")
+		}
+	} else if !reflect.DeepEqual(n.Tasks, oldm.Tasks) && n.CurrentTask != -1 {
+		e.Errorf("Cannot change task list and current task at the same time")
+	}
+	return e.HasError()
 }
 
 func (n *Machine) AfterDelete() {
