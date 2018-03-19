@@ -70,6 +70,7 @@ func (w *Workflow) Indexes() map[string]index.Maker {
 }
 
 func (w *Workflow) Validate() {
+	w.Workflow.Validate()
 	w.AddError(index.CheckUnique(w, w.rt.stores("workflows").Items()))
 	if !w.SetValid() {
 		return
