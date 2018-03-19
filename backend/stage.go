@@ -203,6 +203,24 @@ func (s *Stage) Validate() {
 		}
 	}
 	s.SetAvailable()
+	workflows := s.rt.stores("workflows")
+	if workflows != nil {
+		for _, i := range workflows.Items() {
+			workflow := AsWorkflow(i)
+			for _, stageName := range workflow.Stages {
+				if stageName != s.Name {
+					continue
+				}
+				func() {
+					workflow.rt = s.rt
+					defer func() { workflow.rt = nil }()
+					workflow.ClearValidation()
+					workflow.Validate()
+				}()
+			}
+			break
+		}
+	}
 }
 
 func (s *Stage) OnLoad() error {
@@ -250,6 +268,16 @@ func (s *Stage) BeforeDelete() error {
 		}
 		e.Errorf("Stage %s in use by Machine %s", s.Name, machine.Name)
 	}
+	workflows := s.rt.stores("workflows")
+	for _, i := range workflows.Items() {
+		workflow := AsWorkflow(i)
+		for _, stageName := range workflow.Stages {
+			if stageName != s.Name {
+				continue
+			}
+			e.Errorf("Stage %s in use by Workflow %s", s.Name, workflow.Name)
+		}
+	}
 	return e.HasError()
 }
 
@@ -291,10 +319,10 @@ func (s *Stage) AfterSave() {
 
 var stageLockMap = map[string][]string{
 	"get":     []string{"stages"},
-	"create":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles"},
-	"update":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles"},
-	"patch":   []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles"},
-	"delete":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles"},
+	"create":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles", "workflows"},
+	"update":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles", "workflows"},
+	"patch":   []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles", "workflows"},
+	"delete":  []string{"stages", "bootenvs", "machines", "tasks", "templates", "profiles", "workflows"},
 	"actions": []string{"stages", "profiles", "params"},
 }
 

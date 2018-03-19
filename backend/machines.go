@@ -855,10 +855,10 @@ func AsMachines(o []models.Model) []*Machine {
 }
 
 var machineLockMap = map[string][]string{
-	"get":     []string{"stages", "bootenvs", "machines", "profiles", "params"},
-	"create":  []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params"},
-	"update":  []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params"},
-	"patch":   []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params"},
+	"get":     []string{"stages", "bootenvs", "machines", "profiles", "params", "workflows"},
+	"create":  []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params", "workflows"},
+	"update":  []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params", "workflows"},
+	"patch":   []string{"stages", "bootenvs", "machines", "tasks", "profiles", "templates", "params", "workflows"},
 	"delete":  []string{"stages", "bootenvs", "machines", "jobs", "tasks"},
 	"actions": []string{"stages", "bootenvs", "machines", "profiles", "params"},
 }

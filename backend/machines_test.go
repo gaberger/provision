@@ -48,7 +48,7 @@ func (p *patchTest) test(t *testing.T, target models.Model) {
 
 func TestMachineCrud(t *testing.T) {
 	dt := mkDT(nil)
-	rt := dt.Request(dt.Logger, "stages", "templates", "machines", "tasks", "bootenvs", "profiles", "jobs")
+	rt := dt.Request(dt.Logger, "stages", "templates", "machines", "tasks", "bootenvs", "profiles", "jobs", "workflows")
 	okUUID := uuid.NewRandom()
 	tests := []crudTest{
 		{"Create known-good Template", rt.Create, &models.Template{ID: "default"}, true},
