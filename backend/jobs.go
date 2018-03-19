@@ -398,12 +398,6 @@ func (j *Job) Validate() {
 				m.Runnable = false
 				_, e2 := j.rt.Save(m)
 				j.AddError(e2)
-			} else if j.State == "finished" && m.CurrentTask+1 == len(m.Tasks) {
-				// We are at the end of task list. Bump here to let stages changes if the runner
-				// never comes back.
-				m.CurrentTask = len(m.Tasks)
-				_, e2 := j.rt.Save(m)
-				j.AddError(e2)
 			}
 		}
 	}
