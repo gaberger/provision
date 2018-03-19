@@ -3,6 +3,8 @@ package frontend
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/VictorLowther/jsonpatch2"
 	"github.com/digitalrebar/provision/backend"
@@ -304,6 +306,9 @@ func (f *Frontend) InitJobApi() {
 			rt := f.rt(c, b.Locks("create")...)
 			var code int
 			rt.Do(func(d backend.Stores) {
+				cj := backend.ModelToBackend(&models.Job{}).(*backend.Job)
+				cj.Uuid = uuid.Parse("00000000-0000-0000-0000-000000000000")
+				cj.State = "finished"
 				mo := rt.Find("machines", b.Machine.String())
 				if mo == nil {
 					err = &models.Error{Code: http.StatusUnprocessableEntity, Type: backend.ValidationError,
@@ -311,75 +316,127 @@ func (f *Frontend) InitJobApi() {
 					code = http.StatusUnprocessableEntity
 					return
 				}
-				m := backend.AsMachine(mo)
+				oldM := backend.AsMachine(mo)
 
 				// Machine isn't runnable return conflict
-				if !m.Runnable {
+				if !(oldM.Runnable && oldM.Available) {
 					err = &models.Error{Code: http.StatusConflict, Type: "Conflict",
 						Messages: []string{fmt.Sprintf("Machine %s is not runnable", b.Machine.String())}}
 					code = http.StatusConflict
 					return
 				}
-
-				// Are we running a job or not on list yet, do some checking.
-				newCT := m.CurrentTask
-				if newCT < len(m.Tasks) {
-					if jo := rt.Find("jobs", m.CurrentJob.String()); jo != nil && newCT != -1 {
-						cj := jo.(*backend.Job)
-						if cj.State == "failed" {
-							// We are re-running the current task
-						} else if cj.State == "finished" {
-							// We are running the next task
-							newCT += 1
-						} else if cj.State == "incomplete" {
-							b = cj
-							code = http.StatusAccepted
-							return
-						} else {
-							// Need to error - running job already running or just created.
-							err = &models.Error{Code: http.StatusConflict, Type: "Conflict",
-								Messages: []string{fmt.Sprintf("Machine %s already has running or created job", b.Machine.String())}}
-							code = http.StatusConflict
-							return
+				m := backend.ModelToBackend(models.Clone(oldM)).(*backend.Machine)
+				m.InRunner()
+				defer func() {
+					switch code {
+					case http.StatusNoContent:
+						if m.CurrentTask > len(m.Tasks) {
+							m.CurrentTask = len(m.Tasks)
 						}
-					} else if jo != nil {
-						// At this point, newCT == -1 (we are starting over on a list)
-						// We have an old job - check its state.
-						// We could have been forced and need to close out a job.
-						// if it is running, created, or incomplete, we need
-						// to mark it failed, but leave us runnable.
-						cj := jo.(*backend.Job)
-						if cj.State == "running" || cj.State == "created" || cj.State == "incomplete" {
-							cj.State = "failed"
-							if _, err = rt.Update(cj); err != nil {
-								code = http.StatusBadRequest
-								return
+						if oldM.CurrentTask != m.CurrentTask {
+							if _, err = rt.Update(m); err != nil {
+								code = http.StatusInternalServerError
 							}
-							m.Runnable = true
 						}
-						newCT += 1
-
-					} else {
-						// No current job. Index to next.
-						newCT += 1
 					}
+				}()
+				// Are we running a job or not on list yet, do some checking.
+				if jo := rt.Find("jobs", m.CurrentJob.String()); jo != nil {
+					cj = jo.(*backend.Job)
 				}
-
-				if newCT >= len(m.Tasks) {
-					// Nothing to do.
-					if newCT != m.CurrentTask {
-						m.CurrentTask = newCT
-						_, err = rt.Save(m)
-						if err != nil {
-							code = http.StatusInternalServerError
+				code = http.StatusNoContent
+				if m.CurrentTask >= len(m.Tasks) {
+					return
+				}
+				advance := true
+				if m.CurrentTask == -1 {
+					// At this point, we are starting over on the task list
+					// We could have been forced and need to close out a job.
+					// if it is running, created, or incomplete, we need
+					// to mark it failed, but leave us runnable.
+					switch cj.State {
+					case "running", "created", "incomplete":
+						cj.State = "failed"
+						if _, err = rt.Update(cj); err != nil {
+							code = http.StatusBadRequest
 							return
 						}
-
+						m.Runnable = true
 					}
+					m.CurrentTask = 0
+					advance = false
+				}
+				// If we return from inside this for loop, it will be with NoContent
+				code = http.StatusNoContent
+				for st := strings.SplitN(m.Tasks[m.CurrentTask], ":", 2); len(st) == 2 && m.CurrentTask < len(m.Tasks); m.CurrentTask++ {
+					needUpdate := false
+					// Handle bootenv and stage changes if needed
+					switch st[0] {
+					case "stage":
+						if m.Stage != st[1] {
+							needUpdate = true
+							m.Stage = st[1]
+						}
+					case "bootenv":
+						if m.BootEnv != st[1] {
+							needUpdate = true
+							m.BootEnv = st[1]
+						}
+					default:
+						code = http.StatusInternalServerError
+						err = &models.Error{
+							Code:  code,
+							Type:  "InvalidTaskList",
+							Key:   m.Key(),
+							Model: m.Prefix(),
+						}
+						err.(*models.Error).Errorf("Invalid task list entry[%d]: '%s'", m.CurrentTask, m.Tasks[m.CurrentTask])
+						return
+					}
+					if !needUpdate {
+						// Already at the right whatever it is, so continue on to try and find a task
+						continue
+					}
+					// We need to update the machine.  Do so, then create a fake job that is already
+					// finished to commemorate the occasion, save it, and return
+					_, err = rt.Update(m)
+					if err != nil {
+						code = http.StatusInternalServerError
+						return
+					}
+					b.State = "finished"
+					b.StartTime = time.Now()
+					b.Previous = cj.Uuid
+					b.Machine = m.Uuid
+					b.Stage = m.Stage
+					b.Task = m.Tasks[m.CurrentTask]
+					rt.Create(b)
+					return
+				}
+				switch cj.State {
+				case "incomplete":
+					b = cj
+					code = http.StatusAccepted
+					return
+				case "finished":
+					// Advance to the next task
+					if advance {
+						m.CurrentTask += 1
+					}
+				case "failed":
+					// Someone has set the machine back to runnable and wants
+					// to rerun the current task again.  Let them
+				default:
+					// Need to error - running job already running or just created.
+					err = &models.Error{Code: http.StatusConflict, Type: "Conflict",
+						Messages: []string{fmt.Sprintf("Machine %s already has running or created job", b.Machine.String())}}
+					code = http.StatusConflict
+					return
+				}
+				if m.CurrentTask >= len(m.Tasks) {
 					code = http.StatusNoContent
 					return
 				}
-
 				// Fill in new job.
 				b.State = "created"
 				if m.CurrentJob == nil {
@@ -388,31 +445,21 @@ func (f *Frontend) InitJobApi() {
 					b.Previous = m.CurrentJob
 				}
 				b.Stage = m.Stage
-				b.Task = m.Tasks[newCT]
+				b.Task = m.Tasks[m.CurrentTask]
 				// Create the job, and then update the machine
 				_, err = rt.Create(b)
 				if err == nil {
-					m.CurrentTask = newCT
 					m.CurrentJob = b.Uuid
 					_, err = rt.Save(m)
 					if err != nil {
 						rt.Remove(b)
 						code = http.StatusBadRequest
-						return
 					}
 				}
 				code = http.StatusCreated
 			})
-			if err != nil {
-				be, ok := err.(*models.Error)
-				if ok {
-					c.JSON(be.Code, be)
-				} else {
-					c.JSON(http.StatusBadRequest, models.NewError(c.Request.Method, http.StatusBadRequest, err.Error()))
-				}
-			} else if code == http.StatusNoContent {
-				c.Data(http.StatusNoContent, gin.MIMEJSON, nil)
-			} else {
+			switch code {
+			case http.StatusAccepted, http.StatusCreated:
 				s, ok := models.Model(b).(Sanitizable)
 				if ok {
 					res = s.Sanitize()
@@ -420,6 +467,17 @@ func (f *Frontend) InitJobApi() {
 					res = b
 				}
 				c.JSON(code, res)
+			case http.StatusNoContent:
+				c.Data(http.StatusNoContent, gin.MIMEJSON, nil)
+			default:
+				if err != nil {
+					be, ok := err.(*models.Error)
+					if ok {
+						c.JSON(be.Code, be)
+					} else {
+						c.JSON(http.StatusBadRequest, models.NewError(c.Request.Method, http.StatusBadRequest, err.Error()))
+					}
+				}
 			}
 		})
 
